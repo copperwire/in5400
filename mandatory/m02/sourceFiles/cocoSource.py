@@ -1,7 +1,26 @@
 from torch import nn
 import torch.nn.functional as F
+from torch.autograd import Variable
 import torch
 import numpy as np
+
+
+def make_weights(indim, outdim): 
+    """
+    Helper function that creates weight matrix
+
+    Args:
+        indim: input dimension
+        outdim: output dimension
+    Returns:
+        torch tensor of zero mean variance scaled floats of shape [indim, outdim]
+        that is differentiable
+    """
+    return torch.normal(
+                    torch.zeros((indim, outdim)),
+                    1/np.sqrt(indim)
+                    ).clone().detach().requires_grad_(True)
+
 
 
 ######################################################################################################################
@@ -149,16 +168,17 @@ class GRUCell(nn.Module):
             Variance scaling:  Var[W] = 1/n
         """
         self.hidden_state_sizes = hidden_state_size
+        self.rnn_input_size = hidden_state_size + input_size
 
-        # TODO:
-        self.weight_u = None
-        self.bias_u   = None
+        self.weight_u = torch.nn.Parameter(make_weights(self.rnn_input_size, hidden_state_size))
+        self.bias_u   = torch.nn.Parameter(torch.zeros((1, hidden_state_size), requires_grad=True)) 
 
-        self.weight_r = None
-        self.bias_r   = None
+        self.weight_r = torch.nn.Parameter(make_weights(self.rnn_input_size, hidden_state_size))
+        self.bias_r   = torch.nn.Parameter(torch.zeros((1, hidden_state_size), requires_grad=True))
 
-        self.weight = None
-        self.bias   = None
+        self.weight = torch.nn.Parameter(make_weights(self.rnn_input_size, hidden_state_size))
+        self.bias   = torch.nn.Parameter(torch.zeros((1, hidden_state_size), requires_grad=True)) 
+
         return
 
     def forward(self, x, state_old):
@@ -171,9 +191,16 @@ class GRUCell(nn.Module):
             state_new: The updated hidden state of the recurrent cell. Shape [batch_size, hidden_state_sizes]
 
         """
-        # TODO:
 
-        state_new = None
+        tmp = torch.cat((x, state_old), 1)
+
+        gamma_u = torch.sigmoid(torch.matmul(tmp, self.weight_u) + self.bias_u)
+        gamma_r = torch.sigmoid(torch.matmul(tmp, self.weight_r) + self.bias_r)
+        
+        h_tmp = torch.cat((x, gamma_r * state_old), 1)
+        h_tilde = torch.tanh(torch.matmul(h_tmp, self.weight) + self.bias)
+
+        state_new = gamma_u * state_old + ( 1 - gamma_u) * h_tilde
         return state_new
 
 ######################################################################################################################
@@ -197,8 +224,8 @@ class RNNCell(nn.Module):
         self.hidden_state_size = hidden_state_size
 
         # TODO:
-        self.weight = None
-        self.bias   = None
+        self.weight = make_weights(hidden_state_size + input_size, hidden_state_size)
+        self.bias   = torch.zeros((1, hidden_state_size, ) , requires_grad=True)
         return
 
 
@@ -212,8 +239,9 @@ class RNNCell(nn.Module):
             state_new: The updated hidden state of the recurrent cell. Shape [batch_size, hidden_state_sizes]
 
         """
-        # TODO:
-        state_new = None
+
+        tmp = torch.cat((x, state_old), 1)
+        state_new = torch.tanh(torch.matmul(tmp, self.weight) + self.bias)
         return state_new
 
 ######################################################################################################################
