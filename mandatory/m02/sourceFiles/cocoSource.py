@@ -262,11 +262,15 @@ def loss_fn(logits, yTokens, yWeights):
     Tips:
         F.cross_entropy
     """
-    eps = 0.0000000001 #used to not divide on zero
-    
-    # TODO:
-    sumLoss  = None
-    meanLoss = None
+
+    softmax = F.log_softmax(logits, dim=2)
+    softmax = torch.transpose(softmax, 1, 2)
+
+    loss = logloss(softmax, yTokens)
+    weighted_loss = loss * yWeights
+
+    sumLoss = torch.sum(weighted_loss) 
+    meanLoss = sumLoss/torch.sum(yWeights)
 
     return sumLoss, meanLoss
 
