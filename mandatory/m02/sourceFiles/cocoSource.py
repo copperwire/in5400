@@ -99,12 +99,24 @@ class RNN(nn.Module):
         self.hidden_state_size = hidden_state_size
         self.num_rnn_layers    = num_rnn_layers
         self.cell_type         = cell_type
-
-        # ToDo
-        # Your task is to create a list (self.cells) of type "nn.ModuleList" and populated it with cells of type "self.cell_type".
-        self.cells = None
         
-        return
+        cell_classes = {
+                "RNN": RNNCell,
+                "GRU": GRUCell,
+                }
+
+        self.cell_class = cell_classes[self.cell_type]
+        self.cells = []
+
+        for i in range(num_rnn_layers):
+            if i == 0:
+                self.cells.append(self.cell_class(hidden_state_size, input_size))
+            else:
+                self.cells.append(self.cell_class(hidden_state_size, hidden_state_size))
+
+        self.cells = torch.nn.ModuleList(self.cells)
+
+        return 
 
 
     def forward(self, xTokens, initial_hidden_state, outputLayer, Embedding, is_train=True):
@@ -135,8 +147,56 @@ class RNN(nn.Module):
         # Use for loops to run over "seqLen" and "self.num_rnn_layers" to calculate logits
 
         # Produce outputs
-        logits        = None
-        current_state = None
+        
+        if is_train:
+            return self._train_forward(xTokens, initial_hidden_state, outputLayer, Embedding, seqLen)
+        else:
+            return self._predict_forward(xTokens, initial_hidden_state, outputLayer, Embedding, seqLen)
+
+    def _train_forward(self, xTokens, initial_hidden_state, outputLayer, Embedding, seqLen):
+       
+        #dim: batch_size, seqLen, input_size
+        embedded_tokens = Embedding(xTokens)
+
+        #dim: batch_size, seqLen, vocab_size
+        logits = torch.zeros((xTokens.shape[0], xTokens.shape[1], outputLayer.out_features))
+        
+        #dim: rnn_layers, batch_size, hidden_state_size
+        current_state = initial_hidden_state
+
+        for i in range(seqLen):
+            cell_input = embedded_tokens[:, i, :]
+
+            for j in range(self.num_rnn_layers):
+                state = current_state[j]
+                cell = self.cells[j]
+                current_state[j] = cell(cell_input, state)
+                cell_input = current_state[j]
+
+            logits[:, i, :] = outputLayer(current_state[-1])
+
+        return logits, current_state
+
+    def _predict_forward(self, xTokens, initial_hidden_state, outputLayer, Embedding, seqLen):
+
+        #dim: batch_size, seqLen, vocab_size
+        logits = torch.zeros((xTokens.shape[0], seqLen, outputLayer.out_features))
+        #dim: rnn_layers, batch_size, hidden_state_size
+        current_state = initial_hidden_state
+        cell_input = Embedding(xTokens)[:, 0, :]
+
+        for i in range(seqLen):
+            for j in range(self.num_rnn_layers):
+                state = current_state[j]
+                cell = self.cells[j]
+                current_state[j] = cell(cell_input, state)
+                cell_input = current_state[j]
+
+            logits[:, i, :] = outputLayer(current_state[-1])
+            output = torch.nn.Softmax(dim=1)(logits[:, i, :])
+            words = torch.argmax(output, dim=1)
+            cell_input = Embedding(words) 
+
         return logits, current_state
 
 ########################################################################################################################
@@ -266,7 +326,7 @@ def loss_fn(logits, yTokens, yWeights):
     softmax = F.log_softmax(logits, dim=2)
     softmax = torch.transpose(softmax, 1, 2)
 
-    loss = logloss(softmax, yTokens)
+    loss = torch.nn.NLLLoss(reduction="none")(softmax, yTokens)
     weighted_loss = loss * yWeights
 
     sumLoss = torch.sum(weighted_loss) 
