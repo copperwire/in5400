@@ -47,14 +47,11 @@ class imageCaptionModel(nn.Module):
         self.num_rnn_layers     = config['num_rnn_layers']
         self.cell_type          = config['cellType']
 
-        # ToDo
-        self.Embedding = None
+        self.Embedding = torch.nn.Embedding(self.vocabulary_size, self.embedding_size)
+        self.inputLayer = torch.nn.Linear(self.VggFc7Size, self.hidden_state_sizes)
+        self.rnn = RNN(self.embedding_size, self.hidden_state_sizes, self.num_rnn_layers, self.cell_type)
+        self.outputLayer = torch.nn.Linear(self.hidden_state_sizes, self.vocabulary_size)
 
-        self.inputLayer = None
-
-        self.rnn = None
-
-        self.outputLayer = None
         return
 
     def forward(self, vgg_fc7_features, xTokens, is_train, current_hidden_state=None):
@@ -75,12 +72,26 @@ class imageCaptionModel(nn.Module):
         # Remember that each rnn cell needs its own initial state.
 
         # use self.rnn to calculate "logits" and "current_hidden_state"
-        
-        logits = None
-        current_hidden_state_out = None
 
-        return logits, current_hidden_state_out
+        batch_size = vgg_fc7_features.shape[0]
+        states_prep = self.inputLayer(vgg_fc7_features)
 
+        if current_hidden_state is None:
+            initial_hidden_state = torch.zeros((self.num_rnn_layers, batch_size, self.hidden_state_sizes))
+
+            for i in range(self.num_rnn_layers):
+                initial_hidden_state[i] = states_prep.clone().detach()
+        else:
+            initial_hidden_state = current_hidden_state
+
+        logits, current_state = self.rnn.forward(
+                                        xTokens,
+                                        initial_hidden_state,
+                                        self.outputLayer,
+                                        self.Embedding,
+                                        is_train
+                                        )
+        return logits, current_state
 ######################################################################################################################
 class RNN(nn.Module):
     def __init__(self, input_size, hidden_state_size, num_rnn_layers, cell_type='RNN'):
@@ -138,66 +149,68 @@ class RNN(nn.Module):
         else:
             seqLen = 40 #Max sequence length to be generated
 
-        # ToDo
-        # While iterate through the (stacked) rnn, it may be easier to use lists instead of indexing the tensors.
-        # You can use "list(torch.unbind())" and "torch.stack()" to convert from pytorch tensor to lists and back again.
-
-        # get input embedding vectors
-
-        # Use for loops to run over "seqLen" and "self.num_rnn_layers" to calculate logits
-
-        # Produce outputs
-        
         if is_train:
             return self._train_forward(xTokens, initial_hidden_state, outputLayer, Embedding, seqLen)
         else:
             return self._predict_forward(xTokens, initial_hidden_state, outputLayer, Embedding, seqLen)
 
     def _train_forward(self, xTokens, initial_hidden_state, outputLayer, Embedding, seqLen):
-       
+        batch_size = xTokens.shape[0]
+        device = xTokens.device
+
         #dim: batch_size, seqLen, input_size
         embedded_tokens = Embedding(xTokens)
 
         #dim: batch_size, seqLen, vocab_size
-        logits = torch.zeros((xTokens.shape[0], xTokens.shape[1], outputLayer.out_features))
-        
-        #dim: rnn_layers, batch_size, hidden_state_size
-        current_state = initial_hidden_state
+        logits = torch.zeros((xTokens.shape[0], xTokens.shape[1], outputLayer.out_features)).to(device)
+
+        #dim: seqLen, rnn_layers, batch_size, hidden_state_size
+        states = torch.zeros(
+                    (seqLen+1, self.num_rnn_layers, batch_size, self.hidden_state_size),
+                    ).to(device)
+
+        states[0] = initial_hidden_state
 
         for i in range(seqLen):
             cell_input = embedded_tokens[:, i, :]
 
             for j in range(self.num_rnn_layers):
-                state = current_state[j]
+                state = states[i, j].clone().detach()
                 cell = self.cells[j]
-                current_state[j] = cell(cell_input, state)
-                cell_input = current_state[j]
+                states[i+1, j] = cell(cell_input, state)
+                cell_input = states[i+1, j].clone().detach()
 
-            logits[:, i, :] = outputLayer(current_state[-1])
+            logits[:, i, :] = outputLayer(states[i+1, -1]).clone().detach().requires_grad_(True).to(device)
 
-        return logits, current_state
+        return logits, states[-1]
 
     def _predict_forward(self, xTokens, initial_hidden_state, outputLayer, Embedding, seqLen):
 
+        batch_size = xTokens.shape[0]
         #dim: batch_size, seqLen, vocab_size
         logits = torch.zeros((xTokens.shape[0], seqLen, outputLayer.out_features))
         #dim: rnn_layers, batch_size, hidden_state_size
-        current_state = initial_hidden_state
         cell_input = Embedding(xTokens)[:, 0, :]
+
+        states = torch.zeros(
+                (seqLen+1, self.num_rnn_layers, batch_size, self.hidden_state_size),
+                    )
+
+        states[0] = initial_hidden_state
 
         for i in range(seqLen):
             for j in range(self.num_rnn_layers):
-                state = current_state[j]
+                state = states[i, j].clone().detach()
                 cell = self.cells[j]
-                current_state[j] = cell(cell_input, state)
-                cell_input = current_state[j]
+                states[i, j] = cell(cell_input, state)
+                cell_input = states[i, j].clone().detach()
 
-            logits[:, i, :] = outputLayer(current_state[-1])
+            logits[:, i, :] = outputLayer(states[i+1, -1])
             output = torch.nn.Softmax(dim=1)(logits[:, i, :])
             words = torch.argmax(output, dim=1)
             cell_input = Embedding(words) 
 
-        return logits, current_state
+        return logits, states[-1]
 
 ########################################################################################################################
 class GRUCell(nn.Module):
@@ -227,6 +240,7 @@ class GRUCell(nn.Module):
         Tips:
             Variance scaling:  Var[W] = 1/n
         """
+
         self.hidden_state_sizes = hidden_state_size
         self.rnn_input_size = hidden_state_size + input_size
 
@@ -251,8 +265,10 @@ class GRUCell(nn.Module):
             state_new: The updated hidden state of the recurrent cell. Shape [batch_size, hidden_state_sizes]
 
         """
+        device = x.device
 
-        tmp = torch.cat((x, state_old), 1)
+        state_old = state_old.to(device)
+        tmp = torch.cat((x, state_old), 1, ).to(device)
 
         gamma_u = torch.sigmoid(torch.matmul(tmp, self.weight_u) + self.bias_u)
         gamma_r = torch.sigmoid(torch.matmul(tmp, self.weight_r) + self.bias_r)
@@ -283,9 +299,9 @@ class RNNCell(nn.Module):
         """
         self.hidden_state_size = hidden_state_size
 
-        # TODO:
-        self.weight = make_weights(hidden_state_size + input_size, hidden_state_size)
-        self.bias   = torch.zeros((1, hidden_state_size, ) , requires_grad=True)
+        self.weight = torch.nn.Parameter(make_weights(hidden_state_size + input_size, hidden_state_size))
+        self.bias   = torch.nn.Parameter(torch.zeros((1, hidden_state_size, ) , requires_grad=True))
+
         return
 
 
@@ -300,7 +316,9 @@ class RNNCell(nn.Module):
 
         """
 
-        tmp = torch.cat((x, state_old), 1)
+        device = x.device
+        state_old = state_old.to(device)
+        tmp = torch.cat((x, state_old), 1).to(device)
         state_new = torch.tanh(torch.matmul(tmp, self.weight) + self.bias)
         return state_new
 
