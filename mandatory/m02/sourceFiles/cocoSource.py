@@ -74,11 +74,10 @@ class imageCaptionModel(nn.Module):
         # use self.rnn to calculate "logits" and "current_hidden_state"
 
         batch_size = vgg_fc7_features.shape[0]
-        states_prep = self.inputLayer(vgg_fc7_features)
+        states_prep = torch.tanh(self.inputLayer(vgg_fc7_features))
 
         if current_hidden_state is None:
             initial_hidden_state = torch.zeros((self.num_rnn_layers, batch_size, self.hidden_state_sizes))
-
             for i in range(self.num_rnn_layers):
                 initial_hidden_state[i] = states_prep.clone().detach()
         else:
@@ -175,12 +174,11 @@ class RNN(nn.Module):
             cell_input = embedded_tokens[:, i, :]
 
             for j in range(self.num_rnn_layers):
-                state = states[i, j].clone().detach()
+                state = states[i, j].clone()#.detach()
                 cell = self.cells[j]
                 states[i+1, j] = cell(cell_input, state)
-                cell_input = states[i+1, j].clone().detach()
-
-            logits[:, i, :] = outputLayer(states[i+1, -1]).clone().detach().requires_grad_(True).to(device)
+                cell_input = states[i+1, j].clone()#.detach()
+            logits[:, i, :] = outputLayer(states[i+1, -1].clone())
 
         return logits, states[-1]
 
@@ -202,11 +200,11 @@ class RNN(nn.Module):
             for j in range(self.num_rnn_layers):
                 state = states[i, j].clone().detach()
                 cell = self.cells[j]
-                states[i, j] = cell(cell_input, state)
-                cell_input = states[i, j].clone().detach()
+                states[i + 1, j] = cell(cell_input, state)
+                cell_input = states[i + 1 , j].clone().detach()
 
             logits[:, i, :] = outputLayer(states[i+1, -1])
-            output = torch.nn.Softmax(dim=1)(logits[:, i, :])
+            output = torch.nn.LogSoftmax(dim=1)(logits[:, i, :])
             words = torch.argmax(output, dim=1)
             cell_input = Embedding(words) 
 
@@ -303,7 +301,6 @@ class RNNCell(nn.Module):
         self.bias   = torch.nn.Parameter(torch.zeros((1, hidden_state_size, ) , requires_grad=True))
 
         return
-
 
     def forward(self, x, state_old):
         """
